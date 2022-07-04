@@ -1,6 +1,10 @@
   // SPDX-License-Identifier: MIT
  
 pragma solidity ^0.8.5;
+
+import "@openzeppelin/contracts/utils/Counters.sol";
+import "@openzeppelin/contracts/token/ERC721/IERC721.sol";
+
 contract Auction {
     address payable public contractAddress;
     // address public highestBidder;
@@ -22,7 +26,8 @@ contract Auction {
          bool sold;
     }
 
-    uint private currentItemCount;
+    using Counters for Counters.Counter;
+    Counters.Counter private currentItemCount;
     mapping(uint => Item) public items;
     mapping(uint => mapping(address => uint)) public bids;
 
@@ -40,6 +45,9 @@ contract Auction {
     error AuctionNotYetEnded();
     /// The function auctionEnd has already been called.
     error AuctionEndAlreadyCalled();
+    /// Only NFT owner can list NFT.
+    error NotNftOwner();
+
 
     /// Create a simple auction with `biddingTime`
     /// seconds bidding time on behalf of the
@@ -54,38 +62,53 @@ contract Auction {
         require(msg.sender == contractAddress, "Not authorised to create auction.");
         _;
     }
-
+   
     function createItem ( 
         address _nftContract,
         uint _tokenId,
         uint _dropDays,
         uint _auctionDays, 
         uint _price
-        ) public payable{
+        ) public payable nftOwnerOnly(_nftContract, _tokenId){
             // require(msg.value == notableDropsCharge, "Provide the charges to utilise notable drops.");
-            currentItemCount += 1;
-            items[currentItemCount] = Item(currentItemCount, _nftContract, payable(msg.sender), payable(msg.sender), payable(address(0)), _tokenId, (block.timestamp + (_dropDays * 86400)), (block.timestamp + (_auctionDays * 86400)), _price, address(0), 0, false, false);
+            currentItemCount.increment();
+            items[currentItemCount.current()] = 
+                Item(currentItemCount.current(), _nftContract, 
+                payable(msg.sender), 
+                payable(msg.sender), 
+                payable(address(0)), _tokenId, 
+                (block.timestamp + (_dropDays * 86400)), 
+                (block.timestamp + (_auctionDays * 86400)), 
+                _price, address(0), 
+                0, false, false);
     }
 
-    /// Bid on the auction with the value sent
-    /// together with this transaction.
-    /// The value will only be refunded if the
-    /// auction is not won.
-    function bid(uint _itemId) external payable {
 
-        if (block.timestamp > items[_itemId].auctionEndTime)
+    modifier isValidBid(uint _itemId){
+        Item storage item = items[_itemId];        
+        if (block.timestamp > item.auctionEndTime)
             revert AuctionAlreadyEnded();
-
-        if (msg.value < items[_itemId].price)
+        if (msg.value < item.price)
             revert BidPriceLessThanFloorPrice();
-
-        if (msg.value <= items[_itemId].highestBid)
+        if (msg.value <= item.highestBid)
             revert BidNotHighEnough(items[_itemId].highestBid);
+        _;
+    }
 
+    modifier nftOwnerOnly(address _nftContract, uint _tokenId){
+         bool callerIsTokenOwner =  IERC721(_nftContract).ownerOf(_tokenId) == msg.sender ? true
+                                                            : false;
+        if (!callerIsTokenOwner)  
+            revert NotNftOwner();                                        
+        _;
+    }
+
+    /// Bid on the auction with the value sent together with this transaction.
+    /// The value will only be refunded if this is not the winning bid.
+    function bid(uint _itemId) external payable isValidBid(_itemId) {
         if (items[_itemId].highestBid != 0) {
             bids[_itemId][items[_itemId].highestBidder] += items[_itemId].highestBid;
-        }
-        
+        }        
         items[_itemId].highestBidder = msg.sender;
         items[_itemId].highestBid = msg.value;
         emit HighestBidIncreased(msg.sender, msg.value);
