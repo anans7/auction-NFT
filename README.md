@@ -1,2 +1,10 @@
 # auction-NFT
-I just finished the tutorials and decided to come up with this NFT auction contract and I also added some functionalities
+
+## Auction-NFT is a marketplace where users can:
+
+1. Create an auction of tokens they own
+2. Bid on other auctions
+3. Increase their bidding value on an auction if they got outbid
+4. Cancel an auction
+5. End an auction
+
