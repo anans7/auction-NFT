@@ -1,41 +1,44 @@
   // SPDX-License-Identifier: MIT
- 
 pragma solidity ^0.8.5;
-contract Auction {
-    address payable public contractAddress;
-    // address public highestBidder;
-    // uint public highestBid;
+
+import "@openzeppelin/contracts/utils/Counters.sol";
+import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
+import "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
+
+contract Auction is IERC721Receiver {
+    address payable public contractOwner;
+    uint256 cancelFee = 1 ether;
 
     struct Item {
-        uint itemId;
-        address nftContract;
-        address payable creator;
+        IERC721 nftContract;
         address payable seller;
         address payable owner;
-        uint tokenId;
-        uint dropEndTime;
-        uint auctionEndTime;
-        uint price;
+        uint256 tokenId;
+        uint256 auctionEndTime;
+        uint256 price;
         address highestBidder;
-        uint highestBid;
-        bool auctionEnded;
-         bool sold;
+        uint256 highestBid;
+        bool sold;
     }
 
-    uint private currentItemCount;
-    mapping(uint => Item) public items;
-    mapping(uint => mapping(address => uint)) public bids;
+    using Counters for Counters.Counter;
+
+    Counters.Counter public currentItemCount;
+    mapping(uint256 => Item) public items;
+    mapping(uint256 => mapping(address => uint256)) public bids;
+    // keeps track of auctions that are over
+    mapping(uint256 => bool) public ended;
 
     // Events that will be emitted on changes.
-    event HighestBidIncreased(address bidder, uint amount);
-    event AuctionEnded(address winner, uint amount);
+    event HighestBidIncreased(address bidder, uint256 amount);
+    event AuctionEnded(address winner, uint256 amount);
 
     /// Bid price is less than floor price.
     error BidPriceLessThanFloorPrice();
     /// The auction has already ended.
     error AuctionAlreadyEnded();
     /// There is already a higher or equal bid.
-    error BidNotHighEnough(uint highestBid);
+    error BidNotHighEnough(uint256 highestBid);
     /// The auction has not ended yet.
     error AuctionNotYetEnded();
     /// The function auctionEnd has already been called.
@@ -45,112 +48,199 @@ contract Auction {
     /// seconds bidding time on behalf of the
     /// beneficiary address `beneficiaryAddress`.
     constructor() {
-        contractAddress = payable(msg.sender);
+        contractOwner = payable(msg.sender);
     }
 
-    uint public auctionEndTime;
+    uint256 public auctionEndTime;
 
-    modifier ownerOnly() {
-        require(msg.sender == contractAddress, "Not authorised to create auction.");
-        _;
-    }
-
-    function createItem ( 
+    function createItem(
         address _nftContract,
-        uint _tokenId,
-        uint _dropDays,
-        uint _auctionDays, 
-        uint _price
-        ) public payable{
-            // require(msg.value == notableDropsCharge, "Provide the charges to utilise notable drops.");
-            currentItemCount += 1;
-            items[currentItemCount] = Item(currentItemCount, _nftContract, payable(msg.sender), payable(msg.sender), payable(address(0)), _tokenId, (block.timestamp + (_dropDays * 86400)), (block.timestamp + (_auctionDays * 86400)), _price, address(0), 0, false, false);
+        uint256 _tokenId,
+        uint256 _auctionDays,
+        uint256 _price
+    ) public payable {
+        require(_nftContract != address(0), "Invalid NFT address");
+        require(_auctionDays >= 1, "Invalid auction days");
+        require(_price > 0, "Invalid price");
+        uint256 id = currentItemCount.current();
+        currentItemCount.increment();
+        ended[id] = false;
+        items[id] = Item(
+            IERC721(_nftContract),
+            payable(msg.sender),
+            payable(address(this)),
+            _tokenId,
+            (block.timestamp + (_auctionDays * 1 days)),
+            _price,
+            address(0),
+            0,
+            false
+        );
+        require(
+            items[id].nftContract.getApproved(_tokenId) == address(this),
+            "You have to approve the contract first for transfer of token"
+        );
+        items[id].nftContract.transferFrom(msg.sender, address(this), _tokenId);
     }
 
     /// Bid on the auction with the value sent
     /// together with this transaction.
     /// The value will only be refunded if the
     /// auction is not won.
-    function bid(uint _itemId) external payable {
-
-        if (block.timestamp > items[_itemId].auctionEndTime)
+    function bid(uint256 _itemId) external payable {
+        Item storage currentItem = items[_itemId];
+        require(
+            currentItem.seller != msg.sender,
+            "You can't bid on your own token"
+        );
+        require(!currentItem.sold, "Auction is over");
+        require(
+            currentItem.highestBidder != msg.sender,
+            "You can't outbid yourself"
+        );
+        require(
+            bids[_itemId][msg.sender] == 0,
+            "Use increase Bid to increase your existing bid"
+        );
+        if (block.timestamp > currentItem.auctionEndTime)
             revert AuctionAlreadyEnded();
 
-        if (msg.value < items[_itemId].price)
-            revert BidPriceLessThanFloorPrice();
+        if (msg.value < currentItem.price) revert BidPriceLessThanFloorPrice();
 
-        if (msg.value <= items[_itemId].highestBid)
-            revert BidNotHighEnough(items[_itemId].highestBid);
+        if (msg.value <= currentItem.highestBid)
+            revert BidNotHighEnough(currentItem.highestBid);
 
-        if (items[_itemId].highestBid != 0) {
-            bids[_itemId][items[_itemId].highestBidder] += items[_itemId].highestBid;
+        if (currentItem.highestBid != 0) {
+            bids[_itemId][currentItem.highestBidder] += currentItem.highestBid;
         }
-        
-        items[_itemId].highestBidder = msg.sender;
-        items[_itemId].highestBid = msg.value;
+
+        currentItem.highestBidder = msg.sender;
+        currentItem.highestBid = msg.value;
         emit HighestBidIncreased(msg.sender, msg.value);
     }
 
-    function increaseBid(uint _itemId) external payable eligibleOnly(_itemId) {
+    function increaseBid(uint256 _itemId)
+        external
+        payable
+        eligibleOnly(_itemId)
+    {
         if (block.timestamp > items[_itemId].auctionEndTime)
             revert AuctionAlreadyEnded();
 
-        if ((msg.value + bids[_itemId][msg.sender]) <= items[_itemId].highestBid)
-            revert BidNotHighEnough(items[_itemId].highestBid);
+        if (
+            (msg.value + bids[_itemId][msg.sender]) <= items[_itemId].highestBid
+        ) revert BidNotHighEnough(items[_itemId].highestBid);
 
-        bids[_itemId][items[_itemId].highestBidder] += items[_itemId].highestBid;
+        bids[_itemId][items[_itemId].highestBidder] += items[_itemId]
+            .highestBid;
         items[_itemId].highestBidder = msg.sender;
         items[_itemId].highestBid = msg.value + bids[_itemId][msg.sender];
         bids[_itemId][msg.sender] = 0;
-        emit HighestBidIncreased(msg.sender, msg.value);       
-    }
-    
-    // modifier checkBidder() {
-    //     require(msg.sender != highestBidder, "You can not withdraw the highest bid.");
-    //     _;
-    // }
-
-    function withdrawlEligibility(uint _itemId) public view returns (bool){
-        if(msg.sender != items[_itemId].highestBidder && (bids[_itemId][msg.sender] != 0)) return true;
-        else return false;
+        emit HighestBidIncreased(msg.sender, msg.value);
     }
 
-    modifier eligibleOnly(uint _itemId) {
-        require(msg.sender != items[_itemId].highestBidder, "The highest bid can not be withdrawn.");
-        require(bids[_itemId][msg.sender] != 0, "You do not have a bid placed.");
-        _;
+    function cancelAuction(uint256 _itemId) public payable {
+        Item storage currentItem = items[_itemId];
+        if (ended[_itemId]) revert AuctionEndAlreadyCalled();
+        require(currentItem.seller == msg.sender, "Unauthorized user");
+        require(
+            block.timestamp < currentItem.auctionEndTime && !currentItem.sold,
+            "Auction is over"
+        );
+        require(
+            msg.value == cancelFee,
+            "You need to pay a fee to cancel auction"
+        );
+        currentItem.auctionEndTime = 0;
+        currentItem.owner = payable(msg.sender);
+        bids[_itemId][currentItem.highestBidder] += currentItem.highestBid;
+        currentItem.highestBidder = address(0);
+        currentItem.highestBid = 0;
+        currentItem.sold = true;
+        (bool success, ) = contractOwner.call{value: cancelFee}("");
+        require(success, "Payment for cancel fee failed");
+        currentItem.nftContract.transferFrom(
+            address(this),
+            msg.sender,
+            currentItem.tokenId
+        );
+    }
+
+    function withdrawlEligibility(uint256 _itemId)
+        public
+        view
+        returns (bool eligible)
+    {
+        eligible = msg.sender != items[_itemId].highestBidder &&
+            (bids[_itemId][msg.sender] > 0)
+            ? true
+            : false;
     }
 
     /// Withdraw a bid that was overbid.
-    function withdraw(uint _itemId) external eligibleOnly(_itemId) returns (bool) {
-        uint amount = bids[_itemId][msg.sender];
+    function withdraw(uint256 _itemId)
+        external
+        eligibleOnly(_itemId)
+        returns (bool)
+    {
+        uint256 amount = bids[_itemId][msg.sender];
         if (amount > 0) {
             bids[_itemId][msg.sender] = 0;
-
-            if (!payable(msg.sender).send(amount)) {
-                bids[_itemId][msg.sender] = amount;
-                return false;
-            }
+            (bool success, ) = payable(msg.sender).call{value: amount}("");
+            require(success, "Withdrawal failed");
+            return true;
         }
-        return true;
-    }
-
-    modifier creatorOnly(uint _itemId) {
-        require(msg.sender == items[_itemId].creator, "Only creator can end the auction.");
-        _;
+        return false;
     }
 
     /// End the auction and send the highest bid
     /// to the beneficiary.
-    function auctionEnd(uint _itemId) external creatorOnly(_itemId){
-        if(items[_itemId].auctionEnded)
-            revert AuctionEndAlreadyCalled();
+    function auctionEnd(uint256 _itemId) external sellerOnly(_itemId) {
+        if (ended[_itemId]) revert AuctionEndAlreadyCalled();
 
-        items[_itemId].auctionEnded = true;
-        emit AuctionEnded(items[_itemId].highestBidder, items[_itemId].highestBid);
-
-        items[_itemId].creator.transfer(items[_itemId].highestBid);
+        ended[_itemId] = true;
+        Item storage currentItem = items[_itemId];
+        address payable seller = currentItem.seller;
+        currentItem.seller = payable(msg.sender);
+        currentItem.owner = payable(msg.sender);
+        uint256 amount = currentItem.highestBid;
+        currentItem.highestBid = 0;
+        (bool success, ) = seller.call{value: amount}("");
+        require(success, "Payment failed");
+        currentItem.nftContract.transferFrom(
+            address(this),
+            msg.sender,
+            currentItem.tokenId
+        );
+        emit AuctionEnded(
+            items[_itemId].highestBidder,
+            items[_itemId].highestBid
+        );
     }
-    
-  
+
+    modifier eligibleOnly(uint256 _itemId) {
+        require(
+            msg.sender != items[_itemId].highestBidder,
+            "The highest bid can not be withdrawn."
+        );
+        require(bids[_itemId][msg.sender] > 0, "You do not have a bid placed.");
+        _;
+    }
+
+    modifier sellerOnly(uint256 _itemId) {
+        require(
+            msg.sender == items[_itemId].seller,
+            "Only seller can end the auction."
+        );
+        _;
+    }
+
+    function onERC721Received(
+        address,
+        address,
+        uint256,
+        bytes calldata
+    ) external pure override returns (bytes4) {
+        return bytes4(this.onERC721Received.selector);
+    }
 }
