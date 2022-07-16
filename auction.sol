@@ -152,11 +152,13 @@ contract Auction is IERC721Receiver {
             "You need to pay a fee to cancel auction"
         );
         currentItem.auctionEndTime = 0;
+        currentItem.seller = payable(address(0));
         currentItem.owner = payable(msg.sender);
         bids[_itemId][currentItem.highestBidder] += currentItem.highestBid;
         currentItem.highestBidder = address(0);
         currentItem.highestBid = 0;
         currentItem.sold = true;
+        ended[_itemId] = true;
         (bool success, ) = contractOwner.call{value: cancelFee}("");
         require(success, "Payment for cancel fee failed");
         currentItem.nftContract.transferFrom(
@@ -201,15 +203,15 @@ contract Auction is IERC721Receiver {
         ended[_itemId] = true;
         Item storage currentItem = items[_itemId];
         address payable seller = currentItem.seller;
-        currentItem.seller = payable(msg.sender);
-        currentItem.owner = payable(msg.sender);
+        currentItem.seller = payable(address(0));
+        currentItem.owner = payable(currentItem.highestBidder);
         uint256 amount = currentItem.highestBid;
         currentItem.highestBid = 0;
         (bool success, ) = seller.call{value: amount}("");
         require(success, "Payment failed");
         currentItem.nftContract.transferFrom(
             address(this),
-            msg.sender,
+            currentItem.highestBidder,
             currentItem.tokenId
         );
         emit AuctionEnded(
